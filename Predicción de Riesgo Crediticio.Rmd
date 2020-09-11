@@ -1,0 +1,450 @@
+---
+title: "Riesgo Crediticio"
+author: "Giovanny Lopez"
+date: "11/9/2020"
+output:
+  html_document: 
+    theme: flatly
+    highlight: tango
+    toc: yes
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE,
+                      message = FALSE)
+```
+
+
+# 1. Procesamiento de Datos  
+
+## 1.1 Exploración de Datos 
+Carga de paquetes.  
+Carga de datos desde el enlace oficial del curso `Modelación de Riesgo de Crédito`.  
+```{r carga de datos}
+library(gmodels)
+library(tidyverse)
+datos_prestamo <- readRDS(gzcon(url("https://assets.datacamp.com/course/credit-risk-modeling-in-r/loan_data_ch1.rds")))
+```
+
+Estructura de los datos obtenidos:  
+
+```{r estructura}
+str(datos_prestamo)
+```
+
+Traducción de los nombres de las variables para mejor intuición en los reportes:  
+```{r}
+names(datos_prestamo)[1] <- "estado_prestamo"
+names(datos_prestamo)[2] <- "monto_prestado"
+names(datos_prestamo)[3] <- "tasa_interes"
+names(datos_prestamo)[4] <- "calificacion"
+names(datos_prestamo)[5] <- "antiguedad_trabajo"
+names(datos_prestamo)[6] <- "propiedad_vivienda"
+names(datos_prestamo)[7] <- "ingreso_anual"
+names(datos_prestamo)[8] <- "edad"
+```
+
+```{r}
+datos_prestamo %>% count(propiedad_vivienda)
+```
+
+
+Traducción de observaciones en la variable categórica `propiedad_vivienda`:  
+```{r}
+levels(datos_prestamo$propiedad_vivienda)[levels(datos_prestamo$propiedad_vivienda) == "MORTGAGE"] <- "HIPOTECA"
+levels(datos_prestamo$propiedad_vivienda)[levels(datos_prestamo$propiedad_vivienda) == "OTHER"] <- "OTRO"
+levels(datos_prestamo$propiedad_vivienda)[levels(datos_prestamo$propiedad_vivienda) == "OWN"] <- "PROPIA"
+levels(datos_prestamo$propiedad_vivienda)[levels(datos_prestamo$propiedad_vivienda) == "RENT"] <- "ALQUILER"
+```
+
+
+Resumen de los datos obtenidos:  
+
+```{r resumen}
+summary(datos_prestamo)
+```
+
+
+
+Tabla de datos explicativa:  
+
+|Tipo de Variable|Variable|Descripción|
+|-------------|--------|-------------------------------------------------------|
+|Variable a Predecir|estado_prestamo|1 = préstamo en mora, 0 = préstamo cumplido|
+|Variables Predictoras|monto_prestado|Monto del Préstamo|
+||tasa_interes|Tasa de interés aplicada al préstamo|
+||calificacion|Calificación buró del cliente; A-G máximo-mínimo Solvencia. Refleja el historial de crédito de la persona (variable de comportamiento)|
+||antiguedad_trabajo|Antigüedad en el trabajo|
+||propiedad_vivienda|Estado sobre la propiedad de la vivienda|
+||ingreso_anual|Ingreso Anual|
+||edad|Edad del cliente|
+
+
+Préstamos incumplidos en el conjunto de datos.  
+La función `CrossTable()` de **gmodels** permite echar un vistazo de manera sencilla a las proporciones entre los préstamos incumplidos contra los préstamos cumplidos.  
+```{r CrossTable(estado_prestamo)}
+CrossTable(datos_prestamo$estado_prestamo)
+```
+
+Relación entre la variable `estado_prestamo` y la calificación buró del cliente.  
+Se espera que haya coherencia en los datos, asumiendo que los clientes con altas calificaciones tengan menores proporciones de incumplimiento y visceversa.  
+
+```{r CrossTable() other variables}
+CrossTable(datos_prestamo$calificacion, datos_prestamo$estado_prestamo,
+           prop.r = T,
+           prop.c = F,
+           prop.t = F,
+           prop.chisq = F
+           )
+```
+
+La proporción de incumplimiento de préstamos aumenta a medida que se desciende en las calificaciones.
+
+## 1.2 Atípicos  
+ Los atípicos son datos que presentan una clara diferencia en su comportamiento frente a datos de la misma distribución.   
+### 1.2.1 Exploración de Visualizaciones  
+#### 1.2.1.1 Ingreso Anual Atípico  
+Detección visual de atípicos:   
+Atípico extremo en la clasificación **C**.   
+```{r}
+datos_prestamo %>%
+    ggplot() +
+    geom_point(aes(x = seq_along(ingreso_anual), y = ingreso_anual/1000, color = factor(estado_prestamo), alpha = 0.2)) +
+    labs(x = element_blank(), 
+         y = "Ingreso Anual (En miles USD)") +
+    facet_wrap(~ calificacion, nrow = 2, scales = "free_y") +
+    theme(legend.position = "none")
+```
+
+
+#### 1.2.1.2 Edad Atípica   
+Atípico extremo en la clasicación **C**.   
+```{r}
+datos_prestamo %>%
+    ggplot() +
+    geom_point(aes(x = seq_along(edad), y = edad, color = factor(edad))) +
+    labs(x = element_blank(), 
+         y = "Edad") +
+    facet_wrap(~ calificacion, nrow = 2, scales = "free") +
+    theme(legend.position = "none")
+```
+
+
+## 1.2.2 Tratamiento  
+
+Hay dos atípicos marcados, uno es sobre un cliente de **140** años, otro es un ingreso anual de **USD 6 Millones**.  
+Para su tratamiento, se puede aplicar la siguient regla:  
+*Se filtran los puntos donde se exceden los límites del rango intercuartil, el primer cuartil (Q1) y el tercer cuartil (Q3), con más de 1.5 veces el rango intercuartil (RIQ)*
+Se filtran:   
+1. valores mayores que: **Q3 + 1.5 x RIQ**.  
+2. Valores menores que: **Q1 - 1.5 x RIQ**
+```{r}
+datos_prestamo %>% count(ingreso_anual)
+```
+
+
+```{r cálculo del umbral de aceptación}
+umbral_edad_min <- quantile(datos_prestamo$edad, 0.25)-1.5*IQR(datos_prestamo$edad)
+umbral_edad_max <- quantile(datos_prestamo$edad, 0.75)+1.5*IQR(datos_prestamo$edad)
+umbral_ingreso_min <- quantile(datos_prestamo$ingreso_anual, 0.25)-1.5*IQR(datos_prestamo$ingreso_anual)
+umbral_ingreso_max <- quantile(datos_prestamo$ingreso_anual, 0.75)+1.5*IQR(datos_prestamo$ingreso_anual)
+```
+
+|Variable|Límites de Atípicos||Número de Obeservaciones Fuera de los Límites||
+|---|---|---|---|---|
+||Mínimo|Máximo|Mínimo|Máximo|
+|edad|`r umbral_edad_min`|`r umbral_edad_max`|`r length(which(datos_prestamo$edad<umbral_edad_min))`|`r length(which(datos_prestamo$edad>umbral_edad_max))`|
+|ingreso_anual|`r umbral_ingreso_min`|`r umbral_ingreso_max`|`r length(which(datos_prestamo$ingreso_anual<umbral_ingreso_min))`|`r length(which(datos_prestamo$ingreso_anual>umbral_ingreso_max))`|
+
+Remover atípicos extremos:  
+1. Ingreso Anual mayor a **USD 5000000**.  
+2. Edad mayor a **30 años**
+```{r eliminar atípicos extremos}
+indice_atipico <- which(datos_prestamo$ingreso_anual > 5000000 | datos_prestamo$edad > 130)
+datos_prestamo_sinatp <- datos_prestamo[-indice_atipico,]
+```
+
+#### 1.2.2.1 Distribuciones {.tabset .tabset-fade .tabset-pills}
+
+La tabla de datos muestra las siguientes distribuciones:  
+
+
+##### Monto Prestado  
+
+```{r}
+datos_prestamo_sinatp %>% 
+    ggplot() +
+    geom_histogram(aes(monto_prestado))
+```
+
+
+##### Tasa de Interés  
+```{r}
+datos_prestamo_sinatp %>% 
+    ggplot() +
+    geom_histogram(aes(tasa_interes))
+```
+
+##### Calificación  
+```{r}
+datos_prestamo_sinatp %>% 
+    ggplot() +
+    geom_boxplot(aes(x = seq_along(calificacion), y = calificacion))
+```
+
+
+##### Antiguedad del Trabajo  
+```{r}
+datos_prestamo_sinatp %>% 
+    ggplot() +
+    geom_histogram(aes(antiguedad_trabajo))
+```
+
+
+##### Propiedad de la Vivienda  
+```{r}
+datos_prestamo_sinatp %>% 
+    ggplot() +
+    geom_boxplot(aes(x = seq_along(propiedad_vivienda), y = propiedad_vivienda))
+```
+
+
+##### Ingreso Anual  
+```{r}
+datos_prestamo_sinatp %>% 
+    ggplot() +
+    geom_histogram(aes(ingreso_anual))
+```
+
+
+##### Edad  
+```{r}
+datos_prestamo_sinatp %>% 
+    ggplot() +
+    geom_histogram(aes(edad))
+```
+
+
+
+## 1.3 Valores Faltantes  
+
+Hay NA's en las variables `antiguedad_trabajo` y `tasa_interes`.  
+
+Con `summary()` se puede detectar el número de NA's fácilmente.  
+
+```{r missing data}
+summary(datos_prestamo_sinatp)
+```
+
+Hay tres maneras de tratar a los valores faltantes:   
+1. Eliminar las observaciones (*filas*), de cualquier parte de las variables que los contengan.  
+
+```{r eliminar observaciones con datos faltantes}
+NA_idx_del <- which(is.na(datos_prestamo_sinatp$antiguedad_trabajo) | is.na(datos_prestamo_sinatp$tasa_interes))
+datos_prestamo_sinatp_delNA <- datos_prestamo_sinatp[-NA_idx_del,]
+```
+
+2. Reemplazar los valores faltantes con la mediana de su respectiva variable.   
+
+```{r reemplazo con la mediana}
+median_tasa_interes <- median(datos_prestamo_sinatp$tasa_interes, na.rm = T)
+median_antiguedad_trabajo <- median(datos_prestamo_sinatp$antiguedad_trabajo, na.rm = T)
+datos_prestamo_sinatp_med <- datos_prestamo_sinatp
+datos_prestamo_sinatp_med[is.na(datos_prestamo_sinatp_med$tasa_interes),"tasa_interes"] <- median_tasa_interes
+datos_prestamo_sinatp_med[is.na(datos_prestamo_sinatp_med$antiguedad_trabajo),"antiguedad_trabajo"] <- median_antiguedad_trabajo
+```
+
+3. Mantener los valores faltantes de manera tal que el modelo pueda usarlos. Dado que ambas variables son continuas.  
+
+Categorización:  
+
+ - `antiguedad_trabajo`: 0-1, 1-3, 3-5, 5-10, 10+ y **"Faltante"**
+ - `tasa_interes`: 0-8, 8-11, 11-13.5, 13.5+ y **"Faltante"**
+
+Para evitar la pérdida de información potencial, se crean nuevas variables de categorización.   - `antiguedad_trabajo` -> `antiguedad_trabajo_cat` y    
+ - `tasa_interes` -> `ti_cat`.  
+
+```{r classificación}
+datos_prestamo_sinatp_conNA <- datos_prestamo_sinatp # copia de la tabla de datos
+datos_prestamo_sinatp_conNA$antiguedad_trabajo_cat <- rep(NA, length(datos_prestamo_sinatp_conNA$antiguedad_trabajo))
+datos_prestamo_sinatp_conNA$ti_cat <- rep(NA, length(datos_prestamo_sinatp_conNA$tasa_interes))
+datos_prestamo_sinatp_conNA$antiguedad_trabajo_cat[which(datos_prestamo_sinatp_conNA$antiguedad_trabajo<=1)] <- "0-1"
+datos_prestamo_sinatp_conNA$antiguedad_trabajo_cat[which(datos_prestamo_sinatp_conNA$antiguedad_trabajo>1 & datos_prestamo_sinatp_conNA$antiguedad_trabajo<=3)] <- "1-3"
+datos_prestamo_sinatp_conNA$antiguedad_trabajo_cat[which(datos_prestamo_sinatp_conNA$antiguedad_trabajo>3 & datos_prestamo_sinatp_conNA$antiguedad_trabajo<=5)] <- "3-5"
+datos_prestamo_sinatp_conNA$antiguedad_trabajo_cat[which(datos_prestamo_sinatp_conNA$antiguedad_trabajo>5 & datos_prestamo_sinatp_conNA$antiguedad_trabajo<=10)] <- "5-10"
+datos_prestamo_sinatp_conNA$antiguedad_trabajo_cat[which(datos_prestamo_sinatp_conNA$antiguedad_trabajo>10)] <- "10+"
+datos_prestamo_sinatp_conNA$antiguedad_trabajo_cat[which(is.na(datos_prestamo_sinatp_conNA$antiguedad_trabajo))] <- "Faltantes"
+datos_prestamo_sinatp_conNA$ti_cat[which(datos_prestamo_sinatp_conNA$tasa_interes<=8)] <- "0-8"
+datos_prestamo_sinatp_conNA$ti_cat[which(datos_prestamo_sinatp_conNA$tasa_interes>8 & datos_prestamo_sinatp_conNA$tasa_interes<=11)] <- "8-11"
+datos_prestamo_sinatp_conNA$ti_cat[which(datos_prestamo_sinatp_conNA$tasa_interes>11 & datos_prestamo_sinatp_conNA$tasa_interes<=13.5)] <- "11-13.5"
+datos_prestamo_sinatp_conNA$ti_cat[which(datos_prestamo_sinatp_conNA$tasa_interes>13.5)] <- "13.5+"
+datos_prestamo_sinatp_conNA$ti_cat[which(is.na(datos_prestamo_sinatp_conNA$tasa_interes))] <- "Faltantes"
+datos_prestamo_sinatp_conNA$antiguedad_trabajo_cat <- as.factor(datos_prestamo_sinatp_conNA$antiguedad_trabajo_cat)
+datos_prestamo_sinatp_conNA$ti_cat <- as.factor(datos_prestamo_sinatp_conNA$ti_cat)
+```
+
+### 1.4 División de Datos
+
+Antes de dividir y modelar se realizan los siguientes pasos:  
+1. Crear copia de la tabla de datos.  
+2. Eliminar las variables `antiguedad_trabajo` y `tasa_interes`.  
+3. Convertir el formato de la variable respuesta en **categórica o factor**.  
+  
+Luego se dividen los datos, dos tercios para entrenar y el resto para el conjunto de prueba.  
+```{r división de entrenamiento y prueba}
+datos_prestamo_proc <- datos_prestamo_sinatp_conNA
+datos_prestamo_proc$antiguedad_trabajo <- NULL
+datos_prestamo_proc$tasa_interes <- NULL
+datos_prestamo_proc$estado_prestamo <- as.factor(datos_prestamo_proc$estado_prestamo)
+set.seed(123)
+train_idx <- sample(1:nrow(datos_prestamo_proc),2/3*nrow(datos_prestamo_proc))
+datos_prestamo_train <- datos_prestamo_proc[train_idx, ]
+datos_prestamo_test <- datos_prestamo_proc[-train_idx, ]
+```
+
+Echamos un vistazo al conjunto de entrenamiento.
+
+```{r summary of training set}
+str(datos_prestamo_train)
+```
+
+# 2. Regresión Logística
+
+Con el modelo logístico se busca obtener la probabilidad de que la variable `estado_prestamo` sea 1 (préstamo en mora) dadas las variables explicativas:
+
+$$P(\textrm{estado_prestamo} = 1 | x_1,x_2,...,x_m) = \frac{1}{1 + e^{-(\beta_0+\beta_1x_1+\beta_2x_2+...+\beta_mx_m)}}$$
+
+Con esta ecuación se obtienen predictores lineales, $\beta_0+\beta_1x_1+\beta_2x_2+...+\beta_mx_m$, las variables y sus parámetros betas (pesos). Para ajustar el modelo de regresión logística, se puede usar la función de **modelo lineal generalizado**: `glm()`, con el argumento: `family = "binomial"`.
+
+```{r fitting logistic regression}
+modelo_log <- glm(estado_prestamo ~ edad, family = "binomial", data = datos_prestamo_train)
+modelo_log
+```
+
+`(Intercept)` es el estimado para $\beta_0$, los estimados para las variables son dados por $\beta_1$, $\beta_2$,...,$\beta_m$.
+
+Dados estos cambios en la ecuación anterior,
+
+$$P(\textrm{estado_prestamo} = 1 | x_1,x_2,...,x_m) = \frac{1}{1 + e^{-(\beta_0+\beta_1x_1+\beta_2x_2+...+\beta_mx_m)}} = \frac{e^{\beta_0+\beta_1x_1+\beta_2x_2+...+\beta_mx_m}}{1 + e^{\beta_0+\beta_1x_1+\beta_2x_2+...+\beta_mx_m}}$$
+
+$$P(\textrm{estado_prestamo} = 0 | x_1,x_2,...,x_m) = 1 - \frac{e^{\beta_0+\beta_1x_1+\beta_2x_2+...+\beta_mx_m}}{1 + e^{\beta_0+\beta_1x_1+\beta_2x_2+...+\beta_mx_m}} = \frac{1}{1 + e^{\beta_0+\beta_1x_1+\beta_2x_2+...+\beta_mx_m}}$$
+
+La probabilidad de incumplimiento dividida por la probabilidad de cumplimiento otorga probabilidad a favor del incumplimiento que es igual a la función exponencial del predictor lineal:
+
+$$\frac{P(\textrm{estado_prestamo} = 1 | x_1,x_2,...,x_m)}{P(\textrm{estado_prestamo} = 0 | x_1,x_2,...,x_m)} = e^{\beta_0+\beta_1x_1+\beta_2x_2+...+\beta_mx_m}$$
+
+
+## 2.1 Interpretación
+
+Si $x_j$ aumenta en 1, las probabilidades se multiplican por $e^{\beta_j}$.  
+
+ - Si $\beta_j < 0$ entonces $e^{\beta_j} < 1$, las probabilidades se multiplican por un valor menor que 1, las probabilidades decrecen
+ - Si $\beta_j > 0$ entonces $e^{\beta_j} > 1$, las probabilidades se multiplican por un valor mayor que 1, las probabilidades aumentan
+
+
+### 2.1.1 Interpretación de los coeficientes de las variables categóricas  
+
+Asumiendo el conocimiento previo de la trampa de variables categóricas, eliminando una de ellas, el parámetro para cada una de las otras categorías representa el ratio de probabilidades a favor de un incumplimiento de préstamo entre la categoría de interés y la categoría de referencia (*dummy eliminada*).
+
+```{r}
+modelo_log_cat <- glm(estado_prestamo ~ ti_cat, family = "binomial", data = datos_prestamo_train)
+modelo_log_cat
+```
+
+### 2.1.2 Evaluación del Modelo
+
+Tomar en cuenta lo siguiente:  
+
+ - **Coeficientes**  
+ - **Significancia Estadística**
+
+```{r}
+modelo_log_multi <- glm(estado_prestamo ~ edad + ti_cat + calificacion + monto_prestado + ingreso_anual, data = datos_prestamo_train, family = "binomial")
+summary(modelo_log_multi)
+```
+
+## 2.2 Predicción
+
+Se muestra un modelo pequeño que funciones con las variables `edad` y `ti_cat` como predictoras para estimar la probabilidad de incumplimiento de préstamo.  
+*Nota: Para obtener las predicciones de probabilidades se coloca el argumento: type = "response"*
+
+```{r}
+modelo_log_peque <- glm(estado_prestamo ~ edad * ti_cat, family = "binomial", data = datos_prestamo_train)
+pred_peque <- predict(modelo_log_peque, datos_prestamo_test, type = "response")
+```
+
+Note: `predict()` function by default returns with the linear predictor for generalized linear models so in order to get the probability, we have to instruct the function with the `type = "response"` argument.
+
+After having obtained all the predictions for the test set elements, it is useful to get an initial idea of how good the model is at discriminating by looking at the `range()` of predicted probabilities. A small range might mean that predictions for the test set cases do not lie far apart, and therefore the model might not be very good at discriminating good from bad customers.
+
+## 2.3 Prediction Evaluation
+
+For evaluation of models, we can make use of confusion matrix. Confusion matrices compare the actual response variable values to the predicted values in a tabular format. They are contigency tables of correct and incorrect classifications. (Correct classifications are at the diagonal, often called as True-Positives, True-Negatives.)
+
+Confusion Matrix measures:
+
+$Precisión = \frac{Verdaderos Negativos + Verdaderos Positivos}{n}$ = proporción de casos clasificados correctamente
+
+$Sensibilidad = \frac{Verdaderos Positivos}{Verdaderos Positivos + Falsos Negativos}$ = proporción de casos positivos clasificados correctamente
+
+$Especificidad = \frac{Verdaderos Negativos}{Verdaderos Negativos + Falsos Positivos}$ = proporción de casos negativos clasificados correctamente
+
+Solo queda hacer que los valores predichos no sean probabilidades sino **0's** y **1's** por lo que se debe introducir un umbral que clasifique las probabilidades a dos únicas respuestas.  
+El siguiente modelo genera predicciones usando todas las variables:  
+
+```{r}
+modelo_log_completo <- glm(estado_prestamo ~ ., family = "binomial", data = datos_prestamo_train)
+pred_completa <- predict(modelo_log_completo, datos_prestamo_test, type = "response")
+range(pred_completa)
+```
+
+Predicted default probabilities range from almost 0 to 0.55. The obvious choice for a cutoff value would be 0.5. Let's see what we get then:
+
+```{r}
+pred_umbral_05 <- ifelse(pred_completa < 0.5, 0, 1)
+umbral_05 <- table(datos_prestamo_test$estado_prestamo,pred_umbral_05)
+umbral_05
+```
+Con el umbral en 0.5, la predicción muestras estas métricas:  
+
+ - Precisión: `r sum(diag(umbral_05))/sum(umbral_05)`
+ - Sensibilidad: `r umbral_05[2,2]/sum(umbral_05[2,])`
+ - Especificidad: `r umbral_05[1,1]/sum(umbral_05[1,])`
+
+Un umbral más bajo, otorga el siguiente resultado:  
+
+```{r}
+pred_umbral_015 <- ifelse(pred_completa < 0.15, 0, 1)
+umbral_015 <- table(datos_prestamo_test$estado_prestamo,pred_umbral_015)
+umbral_015
+```
+
+ - Precisión: `r sum(diag(umbral_015))/sum(umbral_015)`
+ - Sensibilidad: `r umbral_015[2,2]/sum(umbral_015[2,])`
+ - Especificidad: `r umbral_015[1,1]/sum(umbral_015[1,])`
+
+El modelo presentado sobre riesgo crediticio muestra que incrementando el valor de umbral de aceptación
+
+ - La precisión disminuye,
+ - La sensibilidad disminuye y
+ - La especificidad aumenta.  
+ 
+Esto se debe a que los incumplimientos de préstamo son eventos no usuales.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
