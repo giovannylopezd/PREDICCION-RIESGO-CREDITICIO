@@ -426,7 +426,7 @@ umbral_015
 
 El modelo presentado sobre riesgo crediticio muestra que incrementando el valor de umbral de aceptación
 
- - La precisión disminuye,
+ - La precisión aumenta,
  - La sensibilidad disminuye y
  - La especificidad aumenta.  
  
